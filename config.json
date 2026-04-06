@@ -1,0 +1,20 @@
+{
+  "_instructions": [
+    "Edit this file each Friday if any roles need a manual stage override.",
+    "Use the Greenhouse job ID as the key (as a string).",
+    "Valid stage values: 'Early', 'Mid', 'Late'.",
+    "stage_label is what shows under the role name in the email (optional).",
+    "Delete entries you no longer need. Leave the file as-is if no overrides are needed."
+  ],
+
+  "overrides": {
+    "324": {
+      "stage": "Early",
+      "stage_label": "Agency Research"
+    },
+    "325": {
+      "stage": "Late",
+      "stage_label": "Reference Checks"
+    }
+  }
+}
