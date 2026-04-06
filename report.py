@@ -457,7 +457,8 @@ def create_draft(html_body):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = SENDER_EMAIL
-    msg["To"]      = ", ".join(RECIPIENTS)
+    msg["To"]      = "exec@code.org"
+    msg["Cc"] = "headcount@code.org"
     msg.attach(MIMEText(html_body, "html"))
 
     service = get_gmail_service()
