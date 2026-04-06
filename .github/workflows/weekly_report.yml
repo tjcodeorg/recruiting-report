@@ -34,6 +34,5 @@ jobs:
           GH_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           GH_USER_ID: ${{ secrets.GH_USER_ID }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
-          RECIPIENTS: ${{ secrets.RECIPIENTS }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: python report.py
