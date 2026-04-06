@@ -35,24 +35,26 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
 
 STAGE_MAP = {
     "early": [
-        "application review",
+        "shortlist",
         "informational",
+        "hiring manager review",
+        "application review",
         "agency",
         "sourcing",
         "resume review",
         "phone screen",
     ],
     "mid": [
-        "homework",
-        "loop",
+        "interview loop",
         "panel",
+        "homework",
+        "take-home",
         "skills assessment",
         "technical",
-        "hiring manager interview",
     ],
     "late": [
-        "reference",
         "final interview",
+        "reference",
         "offer",
         "background",
         "executive interview",
@@ -61,13 +63,14 @@ STAGE_MAP = {
 
 # ── Overrides (edit config.json each week before the script runs) ─────────────
 
-def load_overrides():
-    """Load manual stage overrides from config.json."""
+def load_config():
+    """Load config.json, returning overrides and job_id_map."""
     try:
         with open("config.json") as f:
-            return json.load(f).get("overrides", {})
+            data = json.load(f)
+            return data.get("overrides", {}), data.get("job_id_map", {})
     except FileNotFoundError:
-        return {}
+        return {}, {}
 
 # ── Greenhouse API ────────────────────────────────────────────────────────────
 
@@ -119,6 +122,26 @@ def get_open_jobs(token):
     return gh_get("/jobs", params={"status": "open"}, token=token)
 
 
+def get_job_openings(job_id, token):
+    """
+    Fetch open openings for a job using the v3 /openings endpoint.
+    Filters by job_ids and open=true (v3 uses boolean instead of status string).
+    Returns a formatted label like '#324' or '#331 & #338', or None if unavailable.
+    """
+    try:
+        openings = gh_get("/openings", params={"job_ids": job_id, "open": "true"}, token=token)
+        if not openings:
+            return None
+        # opening_id is the human-readable custom ID; fall back to system id
+        ids = [str(o.get("opening_id") or o.get("id", "")) for o in openings if o.get("opening_id") or o.get("id")]
+        if not ids:
+            return None
+        return " & ".join(f"#{oid}" for oid in ids)
+    except Exception as e:
+        print(f"  [openings warning] {e}")
+        return None
+
+
 def get_active_applications(job_id, token):
     """Return active (non-rejected, non-hired) applications for a job."""
     # v3 uses plural "job_ids" as the parent resource filter, not "job_id"
@@ -160,33 +183,50 @@ def classify_stage(stage_name):
 
 def most_advanced_stage(applications):
     """
-    Given a list of applications, return the stage bucket of the most
-    advanced candidate (Late > Mid > Early).
+    Given a list of applications, return the stage bucket AND the most
+    advanced stage name within that bucket (Late > Mid > Early).
+    v3 exposes stage as a plain string field: app["stage_name"]
     """
     priority = {"Late": 3, "Mid": 2, "Early": 1}
-    best = "Early"
-    best_stage_name = ""
+    # Collect all (bucket, stage_name) pairs
+    stages = []
     for app in applications:
-        current_stage = app.get("current_stage")
-        if not current_stage:
+        stage_name = app.get("stage_name") or ""
+        if not stage_name:
             continue
-        stage_name = current_stage.get("name", "")
         bucket = classify_stage(stage_name)
-        if priority.get(bucket, 0) > priority.get(best, 0):
-            best = bucket
-            best_stage_name = stage_name
-    return best, best_stage_name
+        stages.append((bucket, stage_name))
+
+    if not stages:
+        return "Early", ""
+
+    # Sort by bucket priority descending, then pick the most advanced stage name
+    # within the winning bucket based on keyword order in STAGE_MAP
+    best_bucket = max(stages, key=lambda x: priority.get(x[0], 0))[0]
+    bucket_stages = [s for b, s in stages if b == best_bucket]
+
+    # Pick the stage name that appears latest in the STAGE_MAP keyword list
+    # (lower index = earlier stage, so we want the one matching the latest keyword)
+    keyword_order = STAGE_MAP[best_bucket.lower()]
+    def stage_rank(stage_name):
+        name = stage_name.lower()
+        for i, kw in enumerate(keyword_order):
+            if kw in name:
+                return i
+        return 999
+    best_stage_name = max(bucket_stages, key=stage_rank)
+    return best_bucket, best_stage_name
 
 # ── Build report data ─────────────────────────────────────────────────────────
 
 def build_report():
-    overrides = load_overrides()
+    overrides, job_id_map = load_config()
     token = get_gh_token()
     jobs = get_open_jobs(token)
 
-    # Total headcount = sum of number_of_openings across open jobs
-    total_headcount = sum(j.get("number_of_openings", 1) for j in jobs)
     total_roles = len(jobs)
+    # Headcount will be counted from actual open openings per job below
+    total_headcount = 0
 
     buckets = {"Early": [], "Mid": [], "Late": []}
 
@@ -195,11 +235,14 @@ def build_report():
         job_name = job["name"]
         openings = job.get("number_of_openings", 1)
 
-        # Build the job ID label (e.g. "#324" or "#331 & #338" for multiple openings)
-        job_ids_label = _format_job_ids(job)
+        # Try to get opening IDs from Greenhouse v2 openings endpoint
+        opening_label = get_job_openings(job_id, token)
+        job_ids_label = job_id_map.get(str(job_id)) or opening_label or f"#{job_id}"
 
         # Get applications and classify
         apps = get_active_applications(job_id, token)
+
+
 
         if str(job_id) in overrides:
             bucket = overrides[str(job_id)]["stage"]
@@ -210,11 +253,15 @@ def build_report():
             bucket = "Early"
             stage_name = "No active candidates"
 
+        # Count headcount from actual openings if available, else number_of_openings
+        opening_count = len([o for o in ([] if not opening_label else opening_label.split(" & "))]) if opening_label else job.get("number_of_openings", 1)
+        total_headcount += opening_count
+
         buckets[bucket].append({
             "name": job_name,
             "ids_label": job_ids_label,
             "stage_name": stage_name,
-            "openings": openings,
+            "openings": opening_count,
         })
 
     # Offers accepted this week
@@ -296,130 +343,94 @@ def build_html(data):
         else f"{total_roles} open role{'s' if total_roles != 1 else ''}"
     )
 
-    # Build stage cards
-    stage_cards_html = ""
-    for bucket in ["Early", "Mid", "Late"]:
+    def stage_block(bucket, color_dot, color_bg, color_border):
         roles = buckets[bucket]
         count = len(roles)
-        colors = STAGE_COLORS[bucket]
-        roles_html = ""
+        rows = ""
         for role in roles:
-            stage_label = f"<span style='color:#666;font-size:13px;'>{role['stage_name']}</span>" if role["stage_name"] else ""
-            roles_html += f"""
-            <div style='padding:10px 0;border-bottom:1px solid #eee;'>
-              <div style='font-weight:600;font-size:15px;color:#222;'>
-                {role['name']}
-                <span style='font-weight:400;color:#888;font-size:13px;'>{role['ids_label']}</span>
-              </div>
-              {stage_label}
-            </div>"""
+            label = f"<br><span style='color:#666;font-size:12px;'>{role['stage_name']}</span>" if role["stage_name"] else ""
+            rows += f"<tr><td style='padding:6px 0;border-bottom:1px solid #eee;font-size:14px;'><b>{role['name']}</b> <span style='color:#999;font-size:12px;'>{role['ids_label']}</span>{label}</td></tr>"
+        if not rows:
+            rows = "<tr><td style='color:#bbb;font-size:13px;padding:6px 0;'>No roles in this stage</td></tr>"
+        return f"""<td width="33%" valign="top" style="padding:8px;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:{color_bg};border:1.5px solid {color_border};border-radius:8px;">
+    <tr><td style="padding:12px 14px 8px;">
+      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{color_dot};margin-right:6px;"></span>
+      <b style="font-size:15px;color:#333;">{bucket} Stage</b>
+      <span style="float:right;background:{color_border};border-radius:12px;padding:1px 9px;font-size:12px;font-weight:700;">{count}</span>
+    </td></tr>
+    <tr><td style="padding:0 14px 12px;"><table width="100%" cellpadding="0" cellspacing="0">{rows}</table></td></tr>
+  </table>
+</td>"""
 
-        if not roles_html:
-            roles_html = "<div style='color:#aaa;font-size:13px;padding:8px 0;'>No roles in this stage</div>"
+    stages_html = (
+        stage_block("Early", "#4A6EF5", "#EEF4FF", "#93B4FF") +
+        stage_block("Mid",   "#F5A623", "#FFF8EE", "#FFD093") +
+        stage_block("Late",  "#27AE60", "#EEFFF4", "#93FFBD")
+    )
 
-        stage_cards_html += f"""
-        <div style='flex:1;min-width:220px;background:{colors['bg']};border:1.5px solid {colors['border']};
-                    border-radius:10px;padding:18px 20px;margin:8px;'>
-          <div style='display:flex;align-items:center;margin-bottom:12px;'>
-            <span style='width:12px;height:12px;border-radius:50%;background:{colors['dot']};
-                         display:inline-block;margin-right:8px;'></span>
-            <span style='font-weight:700;font-size:16px;color:#333;'>{bucket} Stage</span>
-            <span style='margin-left:auto;background:{colors['border']};color:#333;font-weight:700;
-                         border-radius:20px;padding:2px 10px;font-size:13px;'>{count}</span>
-          </div>
-          {roles_html}
-        </div>"""
-
-    # Offer acceptances section
     offers_html = ""
     if offers:
-        items = ""
-        for o in offers:
-            items += f"""
-            <tr>
-              <td style='padding:8px 12px;font-weight:600;'>{o['name']}</td>
-              <td style='padding:8px 12px;'>{o['role']} <span style='color:#888;'>{o['job_id']}</span></td>
-              <td style='padding:8px 12px;color:#27AE60;font-weight:600;'>Starts {o['start_date']}</td>
-            </tr>"""
-        offers_html = f"""
-        <div style='margin-top:28px;'>
-          <h3 style='font-size:16px;font-weight:700;color:#333;margin-bottom:10px;'>
-            🎉 Offer Acceptance{'s' if len(offers) > 1 else ''}
-          </h3>
-          <table style='width:100%;border-collapse:collapse;background:#EEFFF4;border-radius:8px;overflow:hidden;'>
-            <thead>
-              <tr style='background:#93FFBD;'>
-                <th style='padding:8px 12px;text-align:left;font-size:13px;color:#333;'>Candidate</th>
-                <th style='padding:8px 12px;text-align:left;font-size:13px;color:#333;'>Role</th>
-                <th style='padding:8px 12px;text-align:left;font-size:13px;color:#333;'>Start Date</th>
-              </tr>
-            </thead>
-            <tbody>{items}</tbody>
-          </table>
-        </div>"""
+        rows = "".join(
+            f"<tr><td style='padding:6px 10px;font-weight:600;font-size:13px;'>{o['name']}</td>"
+            f"<td style='padding:6px 10px;font-size:13px;'>{o['role']} <span style='color:#888;'>{o['job_id']}</span></td>"
+            f"<td style='padding:6px 10px;font-size:13px;color:#27AE60;font-weight:600;'>Starts {o['start_date']}</td></tr>"
+            for o in offers
+        )
+        offers_html = f"""<tr><td colspan="3" style="padding:20px 0 8px;">
+  <b style="font-size:15px;">🎉 Offer Acceptance{'s' if len(offers)>1 else ''}</b>
+  <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;background:#EEFFF4;border-radius:6px;">
+    <tr style="background:#93FFBD;">
+      <th style="padding:6px 10px;text-align:left;font-size:12px;">Candidate</th>
+      <th style="padding:6px 10px;text-align:left;font-size:12px;">Role</th>
+      <th style="padding:6px 10px;text-align:left;font-size:12px;">Start Date</th>
+    </tr>{rows}
+  </table>
+</td></tr>"""
 
-    # New roles section
     new_roles_html = ""
     if new_roles:
         items = "".join(
-            f"<li style='margin-bottom:4px;'><strong>{r['name']}</strong> "
-            f"({r['ids_label']}"
-            f"{', ' + str(r['openings']) + ' openings' if r['openings'] > 1 else ''})</li>"
+            f"<li style='font-size:14px;margin-bottom:3px;'><b>{r['name']}</b> ({r['ids_label']}{',' + str(r['openings']) + ' openings' if r['openings']>1 else ''})</li>"
             for r in new_roles
         )
-        new_roles_html = f"""
-        <div style='margin-top:28px;'>
-          <h3 style='font-size:16px;font-weight:700;color:#333;margin-bottom:10px;'>🆕 New Role{'s' if len(new_roles) > 1 else ''} This Week</h3>
-          <ul style='margin:0;padding-left:20px;color:#333;font-size:15px;line-height:1.7;'>{items}</ul>
-        </div>"""
+        new_roles_html = f"""<tr><td colspan="3" style="padding:16px 0 8px;">
+  <b style="font-size:15px;">🆕 New Role{'s' if len(new_roles)>1 else ''} This Week</b>
+  <ul style="margin:8px 0 0;padding-left:18px;">{items}</ul>
+</td></tr>"""
 
-    html = f"""
-<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"></head>
-<body style='margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;'>
-  <div style='max-width:720px;margin:32px auto;background:#fff;border-radius:12px;
-              box-shadow:0 2px 8px rgba(0,0,0,0.08);overflow:hidden;'>
-
-    <!-- Header -->
-    <div style='background:#1A2E5A;padding:24px 32px;'>
-      <h1 style='margin:0;color:#fff;font-size:20px;font-weight:700;letter-spacing:0.3px;'>
-        Weekly Recruiting Snapshot
-      </h1>
-      <p style='margin:4px 0 0;color:#9BB3D4;font-size:14px;'>{generated_at}</p>
-    </div>
-
-    <!-- Summary bar -->
-    <div style='background:#F0F4FF;padding:16px 32px;border-bottom:1px solid #E0E6F0;'>
-      <p style='margin:0;font-size:17px;color:#1A2E5A;font-weight:600;'>
-        We currently have <strong>{headcount_label}</strong>
-      </p>
-    </div>
-
-    <!-- Stage cards -->
-    <div style='padding:24px 24px 8px;'>
-      <div style='display:flex;flex-wrap:wrap;margin:-8px;'>
-        {stage_cards_html}
-      </div>
-    </div>
-
-    <!-- Offer acceptances + New roles -->
-    <div style='padding:0 32px 32px;'>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:Arial,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0;">
+<tr><td align="center">
+<table width="620" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:10px;overflow:hidden;">
+  <tr><td style="background:#1A2E5A;padding:20px 28px;">
+    <b style="color:#fff;font-size:18px;">Pipeline Snapshot</b>
+    <div style="color:#9BB3D4;font-size:13px;margin-top:2px;">{generated_at}</div>
+  </td></tr>
+  <tr><td style="background:#F0F4FF;padding:12px 28px;border-bottom:1px solid #E0E6F0;">
+    <span style="font-size:16px;color:#1A2E5A;font-weight:600;">We currently have <b>{headcount_label}</b></span>
+  </td></tr>
+  <tr><td style="padding:16px 12px;">
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>{stages_html}</tr></table>
+  </td></tr>
+  <tr><td style="padding:0 20px 24px;">
+    <table width="100%" cellpadding="0" cellspacing="0">
       {offers_html}
       {new_roles_html}
-    </div>
-
-    <!-- Footer -->
-    <div style='background:#f9f9f9;border-top:1px solid #eee;padding:14px 32px;text-align:center;'>
-      <p style='margin:0;font-size:12px;color:#aaa;'>
-        Auto-generated from Greenhouse &bull; Code.org Talent Acquisition
-      </p>
-    </div>
-
-  </div>
+    </table>
+  </td></tr>
+  <tr><td style="background:#f9f9f9;border-top:1px solid #eee;padding:10px 28px;text-align:center;">
+    <span style="font-size:11px;color:#bbb;">Auto-generated from Greenhouse &bull; Code.org Talent Acquisition</span>
+  </td></tr>
+</table>
+</td></tr>
+</table>
 </body>
 </html>"""
-    return html
+
 
 # ── Gmail send ────────────────────────────────────────────────────────────────
 
@@ -441,7 +452,7 @@ def get_gmail_service():
 def create_draft(html_body):
     """Save the report as a Gmail draft for your review before sending."""
     today = datetime.date.today().strftime("%B %d, %Y")
-    subject = f"Weekly Recruiting Snapshot — {today}"
+    subject = f"Weekly Recruiting & Hiring Update - {today}"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject

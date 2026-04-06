@@ -8,13 +8,9 @@
   ],
 
   "overrides": {
-    "324": {
+    "4402207005": {
       "stage": "Early",
       "stage_label": "Agency Research"
-    },
-    "325": {
-      "stage": "Late",
-      "stage_label": "Reference Checks"
     }
   }
 }
