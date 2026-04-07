@@ -323,9 +323,9 @@ def _format_job_ids(job):
 # ── HTML email ────────────────────────────────────────────────────────────────
 
 STAGE_COLORS = {
-    "Early": {"bg": "#EEF4FF", "border": "#93B4FF", "dot": "#4A6EF5"},
-    "Mid":   {"bg": "#FFF8EE", "border": "#FFD093", "dot": "#F5A623"},
-    "Late":  {"bg": "#EEFFF4", "border": "#93FFBD", "dot": "#27AE60"},
+    "Early": {"bg": "#FEF3E2", "border": "#E8A030", "dot": "#E8A030", "text": "#7A4A00", "subtext": "#E8A030"},
+    "Mid":   {"bg": "#E6F1FB", "border": "#378ADD", "dot": "#378ADD", "text": "#0C447C", "subtext": "#378ADD"},
+    "Late":  {"bg": "#EEFFF4", "border": "#27AE60", "dot": "#27AE60", "text": "#0A4A24", "subtext": "#27AE60"},
 }
 
 def build_html(data):
@@ -337,67 +337,101 @@ def build_html(data):
     generated_at    = data["generated_at"]
 
     headcount_label = (
-        f"{total_roles} open role{'s' if total_roles != 1 else ''} "
-        f"for {total_headcount} headcount"
+        f"{total_roles} open role{'s' if total_roles != 1 else ''} for {total_headcount} headcount"
         if total_headcount != total_roles
         else f"{total_roles} open role{'s' if total_roles != 1 else ''}"
     )
 
-    def stage_block(bucket, color_dot, color_bg, color_border):
+    def stage_row(bucket):
+        c = STAGE_COLORS[bucket]
+        c_bg     = c["bg"]
+        c_border = c["border"]
+        c_dot    = c["dot"]
+        c_text   = c["text"]
+        c_sub    = c["subtext"]
         roles = buckets[bucket]
         count = len(roles)
-        rows = ""
-        for role in roles:
-            label = f"<br><span style='color:#666;font-size:12px;'>{role['stage_name']}</span>" if role["stage_name"] else ""
-            rows += f"<tr><td style='padding:6px 0;border-bottom:1px solid #eee;font-size:14px;'><b>{role['name']}</b> <span style='color:#999;font-size:12px;'>{role['ids_label']}</span>{label}</td></tr>"
-        if not rows:
-            rows = "<tr><td style='color:#bbb;font-size:13px;padding:6px 0;'>No roles in this stage</td></tr>"
-        return f"""<td width="33%" valign="top" style="padding:8px;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:{color_bg};border:1.5px solid {color_border};border-radius:8px;">
-    <tr><td style="padding:12px 14px 8px;">
-      <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{color_dot};margin-right:6px;"></span>
-      <b style="font-size:15px;color:#333;">{bucket} Stage</b>
-      <span style="float:right;background:{color_border};border-radius:12px;padding:1px 9px;font-size:12px;font-weight:700;">{count}</span>
-    </td></tr>
-    <tr><td style="padding:0 14px 12px;"><table width="100%" cellpadding="0" cellspacing="0">{rows}</table></td></tr>
-  </table>
-</td>"""
 
-    stages_html = (
-        stage_block("Early", "#4A6EF5", "#EEF4FF", "#93B4FF") +
-        stage_block("Mid",   "#F5A623", "#FFF8EE", "#FFD093") +
-        stage_block("Late",  "#27AE60", "#EEFFF4", "#93FFBD")
-    )
+        chips_html = ""
+        if roles:
+            for role in roles:
+                stage_label = (
+                    f"<div style='font-size:10px;color:{c_sub};margin-top:2px;'>{role['stage_name']}</div>"
+                ) if role["stage_name"] else ""
+                chips_html += (
+                    f"<div style='display:inline-block;background:{c_bg};border:0.5px solid {c_border};"
+                    f"border-radius:6px;padding:5px 9px;margin:0 6px 6px 0;vertical-align:top;'>"
+                    f"<div style='font-size:12px;font-weight:600;color:{c_text};'>{role['name']}</div>"
+                    f"<div style='font-size:11px;color:{c_sub};'>{role['ids_label']}</div>"
+                    f"{stage_label}"
+                    f"</div>"
+                )
+        else:
+            chips_html = (
+                f"<div style='display:inline-block;background:#f9f9f9;border:0.5px solid #e0e0e0;"
+                f"border-radius:6px;padding:5px 9px;'>"
+                f"<div style='font-size:12px;color:#aaa;font-style:italic;'>No roles</div>"
+                f"</div>"
+            )
 
+        return (
+            f"<tr style='border-bottom:1px solid #eee;'>"
+            f"<td style='padding:14px 22px;'>"
+            f"<div style='display:inline-block;margin-bottom:9px;'>"
+            f"<span style='display:inline-block;width:8px;height:8px;border-radius:50%;"
+            f"background:{c_dot};vertical-align:middle;margin-right:4px;'></span>"
+            f"<span style='font-size:11px;font-weight:600;color:#444;vertical-align:middle;'>{bucket}</span>"
+            f"<span style='font-size:11px;font-weight:600;color:{c_dot};vertical-align:middle;margin-left:3px;'>{count}</span>"
+            f"</div>"
+            f"<div>{chips_html}</div>"
+            f"</td></tr>"
+        )
+
+    stages_html = stage_row("Early") + stage_row("Mid") + stage_row("Late")
+
+    # Offer acceptances
     offers_html = ""
     if offers:
-        rows = "".join(
-            f"<tr><td style='padding:6px 10px;font-weight:600;font-size:13px;'>{o['name']}</td>"
-            f"<td style='padding:6px 10px;font-size:13px;'>{o['role']} <span style='color:#888;'>{o['job_id']}</span></td>"
-            f"<td style='padding:6px 10px;font-size:13px;color:#27AE60;font-weight:600;'>Starts {o['start_date']}</td></tr>"
-            for o in offers
+        offer_items = ""
+        for o in offers:
+            offer_items += (
+                f"<div style='background:#EEFFF4;border:0.5px solid #27AE60;border-radius:6px;"
+                f"padding:8px 12px;margin-bottom:6px;'>"
+                f"<div style='font-size:13px;font-weight:600;color:#0A4A24;'>{o['name']} accepted "
+                f"&middot; {o['role']} <span style='font-weight:400;color:#27AE60;'>{o['job_id']}</span></div>"
+                f"<div style='font-size:11px;color:#27AE60;margin-top:2px;'>Starts {o['start_date']}</div>"
+                f"</div>"
+            )
+        label = "Offer Acceptances" if len(offers) > 1 else "Offer Acceptance"
+        offers_html = (
+            f"<tr><td colspan='2' style='padding:14px 22px 6px;'>"
+            f"<div style='font-size:11px;font-weight:600;color:#27AE60;letter-spacing:0.04em;"
+            f"margin-bottom:8px;'>OFFER ACCEPTANCE{'S' if len(offers)>1 else ''}</div>"
+            f"{offer_items}"
+            f"</td></tr>"
         )
-        offers_html = f"""<tr><td colspan="3" style="padding:20px 0 8px;">
-  <b style="font-size:15px;">🎉 Offer Acceptance{'s' if len(offers)>1 else ''}</b>
-  <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;background:#EEFFF4;border-radius:6px;">
-    <tr style="background:#93FFBD;">
-      <th style="padding:6px 10px;text-align:left;font-size:12px;">Candidate</th>
-      <th style="padding:6px 10px;text-align:left;font-size:12px;">Role</th>
-      <th style="padding:6px 10px;text-align:left;font-size:12px;">Start Date</th>
-    </tr>{rows}
-  </table>
-</td></tr>"""
 
+    # New roles
     new_roles_html = ""
     if new_roles:
-        items = "".join(
-            f"<li style='font-size:14px;margin-bottom:3px;'><b>{r['name']}</b> ({r['ids_label']}{',' + str(r['openings']) + ' openings' if r['openings']>1 else ''})</li>"
-            for r in new_roles
+        nr_items = ""
+        for r in new_roles:
+            openings_note = f" &middot; {r['openings']} openings" if r['openings'] > 1 else ""
+            nr_items += (
+                f"<div style='background:#EEF4FF;border:0.5px solid #378ADD;border-radius:6px;"
+                f"padding:8px 12px;margin-bottom:6px;'>"
+                f"<div style='font-size:13px;font-weight:600;color:#0C447C;'>{r['name']} "
+                f"<span style='font-weight:400;color:#378ADD;'>{r['ids_label']}{openings_note}</span></div>"
+                f"<div style='font-size:11px;color:#378ADD;margin-top:2px;'>Posted this week</div>"
+                f"</div>"
+            )
+        new_roles_html = (
+            f"<tr><td colspan='2' style='padding:14px 22px 6px;'>"
+            f"<div style='font-size:11px;font-weight:600;color:#378ADD;letter-spacing:0.04em;"
+            f"margin-bottom:8px;'>NEW ROLE{'S' if len(new_roles)>1 else ''} THIS WEEK</div>"
+            f"{nr_items}"
+            f"</td></tr>"
         )
-        new_roles_html = f"""<tr><td colspan="3" style="padding:16px 0 8px;">
-  <b style="font-size:15px;">🆕 New Role{'s' if len(new_roles)>1 else ''} This Week</b>
-  <ul style="margin:8px 0 0;padding-left:18px;">{items}</ul>
-</td></tr>"""
 
     return f"""<!DOCTYPE html>
 <html>
@@ -406,24 +440,22 @@ def build_html(data):
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:24px 0;">
 <tr><td align="center">
 <table width="620" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:10px;overflow:hidden;">
-  <tr><td style="background:#1A2E5A;padding:20px 28px;">
-    <b style="color:#fff;font-size:18px;">Pipeline Snapshot</b>
-    <div style="color:#9BB3D4;font-size:13px;margin-top:2px;">{generated_at}</div>
+  <tr><td style="background:#1A2E5A;padding:18px 22px;">
+    <div style="color:#fff;font-size:17px;font-weight:600;">Pipeline Snapshot</div>
+    <div style="color:#9BB3D4;font-size:12px;margin-top:3px;">{generated_at}</div>
   </td></tr>
-  <tr><td style="background:#F0F4FF;padding:12px 28px;border-bottom:1px solid #E0E6F0;">
-    <span style="font-size:16px;color:#1A2E5A;font-weight:600;">We currently have <b>{headcount_label}</b></span>
+  <tr><td style="background:#F0F4FF;padding:10px 22px;border-bottom:1px solid #E0E6F0;">
+    <span style="font-size:14px;color:#1A2E5A;font-weight:600;">We currently have <b>{headcount_label}</b></span>
   </td></tr>
-  <tr><td style="padding:16px 12px;">
-    <table width="100%" cellpadding="0" cellspacing="0"><tr>{stages_html}</tr></table>
-  </td></tr>
-  <tr><td style="padding:0 20px 24px;">
+  <tr><td style="padding:0;">
     <table width="100%" cellpadding="0" cellspacing="0">
+      {stages_html}
       {offers_html}
       {new_roles_html}
     </table>
   </td></tr>
-  <tr><td style="background:#f9f9f9;border-top:1px solid #eee;padding:10px 28px;text-align:center;">
-    <span style="font-size:11px;color:#bbb;">Auto-generated from Greenhouse &bull; Code.org Talent Acquisition</span>
+  <tr><td style="background:#f9f9f9;border-top:1px solid #eee;padding:9px 22px;text-align:center;">
+    <span style="font-size:10px;color:#bbb;">Auto-generated from Greenhouse &bull; Code.org Talent Acquisition</span>
   </td></tr>
 </table>
 </td></tr>
@@ -457,8 +489,7 @@ def create_draft(html_body):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"]    = SENDER_EMAIL
-    msg["To"]      = "exec@code.org"
-    msg["Cc"] = "headcount@code.org"
+    msg["To"]      = ", ".join(RECIPIENTS)
     msg.attach(MIMEText(html_body, "html"))
 
     service = get_gmail_service()
