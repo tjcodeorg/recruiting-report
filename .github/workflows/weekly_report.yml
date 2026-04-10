@@ -2,7 +2,7 @@ name: Weekly Recruiting Report
 
 on:
   schedule:
-     - cron: "58 13 * * 4"
+     - cron: "5 14 * * 5"
   workflow_dispatch:
 
 jobs:
