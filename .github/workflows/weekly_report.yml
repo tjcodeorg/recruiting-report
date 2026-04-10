@@ -2,8 +2,8 @@ name: Weekly Recruiting Report
 
 on:
   schedule:
-    # Runs every Friday at 12:00 UTC (8:00 AM ET)
-    - cron: "0 13 * * 5"
+    # Runs every Friday at 12:00 UTC (9:00 AM ET)
+    - cron: "0 13 * * 5" # 9:00 AM ET
   workflow_dispatch: # also allows manual trigger from GitHub UI
 
 jobs:
