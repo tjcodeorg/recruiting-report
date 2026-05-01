@@ -8,6 +8,9 @@ import json
 import base64
 import datetime
 import requests
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from google.oauth2.credentials import Credentials
@@ -150,22 +153,49 @@ def get_active_applications(job_id, token):
     return [a for a in apps if a.get("status") not in ("rejected", "hired")]
 
 
-def get_recent_offers(token, days=7):
-    """Return offers accepted in the last N days."""
-    # v3 date filter syntax uses pipe operator: field=gte|value
-    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-    offers = gh_get("/offers", params={"resolved_at": f"gte|{cutoff}"}, token=token)
-    return [o for o in offers if o.get("status") == "accepted"]
+
+
+def get_recent_offers(token, days=8):
+    """Return offers accepted in the last N days. v3 status is capitalized 'Accepted'."""
+    cutoff = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=days)
+    all_offers = gh_get("/offers", token=token)
+    accepted = []
+    for o in all_offers:
+        if o.get("status") != "Accepted":
+            continue
+        resolved_at = o.get("resolved_at")
+        if not resolved_at:
+            continue
+        try:
+            resolved_dt = datetime.datetime.fromisoformat(resolved_at.replace("Z", "+00:00")).replace(tzinfo=None)
+            if resolved_dt >= cutoff:
+                accepted.append(o)
+        except Exception:
+            continue
+    return accepted
+
+
+def get_candidates_by_ids(candidate_ids, token):
+    """Fetch candidates by ID using v3 list endpoint with ids filter (comma-separated integers, max 50)."""
+    if not candidate_ids:
+        return {}
+    try:
+        ids_str = ",".join(str(cid) for cid in candidate_ids if cid)
+        # v3 candidates list endpoint supports ?ids= as a comma-separated list of integers
+        result = gh_get("/candidates", params={"ids": ids_str}, token=token)
+        if isinstance(result, list):
+            return {c["id"]: c for c in result}
+        return {}
+    except Exception as e:
+        print(f"  [candidates warning] {e}")
+        return {}
 
 
 def get_active_offers(token):
-    """Return offers that are currently out (sent/approved but not yet accepted/rejected)."""
+    """Return offers currently out. v3 status for a sent offer is 'Created'."""
     try:
         offers = gh_get("/offers", token=token)
-        active = [o for o in offers if o.get("status") in ("sent", "approved", "pending_approval")]
-        return active
+        return [o for o in offers if o.get("status") == "Created"]
     except Exception as e:
         print(f"  [offers warning] {e}")
         return []
@@ -173,7 +203,7 @@ def get_active_offers(token):
 
 def get_new_jobs(token, days=7):
     """Return jobs opened in the last N days."""
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days)
+    cutoff = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - datetime.timedelta(days=days)
     jobs = gh_get("/jobs", params={"status": "open"}, token=token)
     return [
         j for j in jobs
@@ -340,23 +370,35 @@ def build_report():
     # Offers accepted this week
     recent_offers = get_recent_offers(token, days=8)
     offer_acceptances = []
+    accepted_candidate_ids = [o.get("candidate_id") for o in recent_offers if o.get("candidate_id")]
+    accepted_candidates = get_candidates_by_ids(accepted_candidate_ids, token)
     for offer in recent_offers:
-        candidate = offer.get("candidate", {})
+        candidate_id = offer.get("candidate_id")
+        candidate = accepted_candidates.get(candidate_id, {})
         first = candidate.get("first_name", "")
-        last_initial = (candidate.get("last_name") or " ")[0] + "."
-        job_name = offer.get("job", {}).get("name", "Unknown Role")
-        job_id_str = f"#{offer.get('job', {}).get('id', '')}"
-        start_date = offer.get("starts_at", "")
-        if start_date:
+        last = candidate.get("last_name", "")
+        full_name = f"{first} {last}".strip()
+        job_id = offer.get("job_id", "")
+        job_name = (offer.get("custom_fields", {}).get("job_title", {}) or {}).get("value", "")
+        if not job_name:
+            job_name = next((j["name"] for j in jobs if j["id"] == job_id), "Unknown Role")
+        job_id_str = job_id_map.get(str(job_id)) or get_job_openings(job_id, token) or f"#{job_id}"
+        start_date = offer.get("starts_on", "") or offer.get("starts_at", "")
+        if start_date and "T" in start_date:
             try:
                 start_date = datetime.datetime.fromisoformat(
                     start_date.replace("Z", "+00:00")
                 ).strftime("%-m/%-d")
             except Exception:
                 pass
-        last_name = candidate.get("last_name", "")
+        elif start_date and len(start_date) == 10:
+            # Already a date string like "2026-06-01"
+            try:
+                start_date = datetime.datetime.strptime(start_date, "%Y-%m-%d").strftime("%-m/%-d")
+            except Exception:
+                pass
         offer_acceptances.append({
-            "name": f"{first} {last_name}".strip(),
+            "name": full_name or job_name,
             "role": job_name,
             "job_id": job_id_str,
             "start_date": start_date,
@@ -365,13 +407,19 @@ def build_report():
     # Active offers out
     active_offer_list = get_active_offers(token)
     offers_out = []
+    out_candidate_ids = [o.get("candidate_id") for o in active_offer_list if o.get("candidate_id")]
+    out_candidates = get_candidates_by_ids(out_candidate_ids, token)
     for o in active_offer_list:
-        candidate = o.get("candidate", {})
+        candidate_id = o.get("candidate_id")
+        candidate = out_candidates.get(candidate_id, {})
         first = candidate.get("first_name", "")
         last = candidate.get("last_name", "")
         full_name = f"{first} {last}".strip()
-        job_name = o.get("job", {}).get("name", "Unknown Role")
-        job_id_label = job_id_map.get(str(o.get("job", {}).get("id", ""))) or f"#{o.get('job', {}).get('id', '')}"
+        job_name = (o.get("custom_fields", {}).get("job_title", {}) or {}).get("value", "")
+        job_id = o.get("job_id", "")
+        if not job_name:
+            job_name = next((j["name"] for j in jobs if j["id"] == job_id), "Unknown Role")
+        job_id_label = job_id_map.get(str(job_id)) or get_job_openings(job_id, token) or f"#{job_id}"
         offers_out.append({
             "name": full_name,
             "role": job_name,
@@ -382,9 +430,11 @@ def build_report():
     new_jobs = get_new_jobs(token, days=7)
     new_roles = []
     for j in new_jobs:
+        nr_job_id = j["id"]
+        nr_label = job_id_map.get(str(nr_job_id)) or get_job_openings(nr_job_id, token) or f"#{nr_job_id}"
         new_roles.append({
             "name": j["name"],
-            "ids_label": _format_job_ids(j),
+            "ids_label": nr_label,
             "openings": j.get("number_of_openings", 1),
         })
 
@@ -489,8 +539,9 @@ def build_html(data):
             offer_items += (
                 f"<div style='background:#EEFFF4;border:0.5px solid #27AE60;border-radius:6px;"
                 f"padding:8px 12px;margin-bottom:6px;'>"
-                f"<div style='font-size:13px;font-weight:600;color:#0A4A24;'>{o['name']} accepted "
-                f"&middot; {o['role']} <span style='font-weight:400;color:#27AE60;'>{o['job_id']}</span></div>"
+                f"<div style='font-size:13px;font-weight:600;color:#0A4A24;'>"
+                f"{'Offer accepted: ' + o['name'] + ' &middot; ' if o.get('name') else 'Offer accepted for '}"
+                f"{o['role']} <span style='font-weight:400;color:#27AE60;'>{o['job_id']}</span></div>"
                 f"<div style='font-size:11px;color:#27AE60;margin-top:2px;'>Starts {o['start_date']}</div>"
                 f"</div>"
             )
@@ -511,8 +562,9 @@ def build_html(data):
             out_items += (
                 f"<div style='background:#F0F4FF;border:0.5px solid #378ADD;border-radius:6px;"
                 f"padding:8px 12px;margin-bottom:6px;'>"
-                f"<div style='font-size:13px;font-weight:600;color:#0C447C;'>Offer out to {o['name']}"
-                f" &middot; {o['role']} <span style='font-weight:400;color:#378ADD;'>{o['job_id']}</span></div>"
+                f"<div style='font-size:13px;font-weight:600;color:#0C447C;'>"
+                f"{'Offer out to ' + o['name'] + ' &middot; ' if o.get('name') else 'Offer out for '}"
+                f"{o['role']} <span style='font-weight:400;color:#378ADD;'>{o['job_id']}</span></div>"
                 f"</div>"
             )
         offers_out_html = (
