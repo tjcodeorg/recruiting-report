@@ -160,6 +160,17 @@ def get_recent_offers(token, days=7):
     return [o for o in offers if o.get("status") == "accepted"]
 
 
+def get_active_offers(token):
+    """Return offers that are currently out (sent/approved but not yet accepted/rejected)."""
+    try:
+        offers = gh_get("/offers", token=token)
+        active = [o for o in offers if o.get("status") in ("sent", "approved", "pending_approval")]
+        return active
+    except Exception as e:
+        print(f"  [offers warning] {e}")
+        return []
+
+
 def get_new_jobs(token, days=7):
     """Return jobs opened in the last N days."""
     cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=days)
@@ -244,28 +255,90 @@ def build_report():
 
 
 
+        # Count openings
+        opening_ids = []
+        if opening_label:
+            opening_ids = [o.strip() for o in opening_label.split("&")]
+        opening_count = len(opening_ids) if opening_ids else job.get("number_of_openings", 1)
+        total_headcount += opening_count
+
         if str(job_id) in overrides:
             bucket = overrides[str(job_id)]["stage"]
             stage_name = overrides[str(job_id)].get("stage_label", "")
+            buckets[bucket].append({
+                "name": job_name,
+                "ids_label": job_ids_label,
+                "stage_name": stage_name,
+                "openings": opening_count,
+            })
+        elif opening_count > 1 and apps:
+            # Multi-opening split logic:
+            # For each candidate in an offer stage, show a separate chip.
+            # Then show one chip for the next most advanced non-offer candidate.
+            priority = {"Late": 3, "Mid": 2, "Early": 1}
+            offer_apps = [a for a in apps if a.get("stage_name") and "offer" in a.get("stage_name", "").lower()]
+            non_offer_apps = [a for a in apps if a not in offer_apps]
+
+            if offer_apps:
+                # One chip per offer candidate, up to opening_count - 1
+                offer_chips = offer_apps[:opening_count - 1] if len(offer_apps) < opening_count else offer_apps[:opening_count]
+                remaining_openings = opening_count - len(offer_chips)
+
+                for i, app in enumerate(offer_chips):
+                    chip_id = opening_ids[i] if i < len(opening_ids) else job_ids_label
+                    buckets["Late"].append({
+                        "name": job_name,
+                        "ids_label": chip_id,
+                        "stage_name": app.get("stage_name", "Offer"),
+                        "openings": 1,
+                    })
+
+                # One chip for the next most advanced non-offer candidate
+                if remaining_openings > 0 and non_offer_apps:
+                    _, next_stage = most_advanced_stage(non_offer_apps)
+                    next_bucket = classify_stage(next_stage) if next_stage else "Early"
+                    remaining_ids = " & ".join(opening_ids[len(offer_chips):]) if opening_ids else job_ids_label
+                    buckets[next_bucket].append({
+                        "name": job_name,
+                        "ids_label": remaining_ids,
+                        "stage_name": next_stage or "No active candidates",
+                        "openings": remaining_openings,
+                    })
+                elif remaining_openings > 0:
+                    remaining_ids = " & ".join(opening_ids[len(offer_chips):]) if opening_ids else job_ids_label
+                    buckets["Early"].append({
+                        "name": job_name,
+                        "ids_label": remaining_ids,
+                        "stage_name": "No active candidates",
+                        "openings": remaining_openings,
+                    })
+            else:
+                # No offers out — classify normally
+                bucket, stage_name = most_advanced_stage(apps)
+                buckets[bucket].append({
+                    "name": job_name,
+                    "ids_label": job_ids_label,
+                    "stage_name": stage_name,
+                    "openings": opening_count,
+                })
         elif apps:
             bucket, stage_name = most_advanced_stage(apps)
+            buckets[bucket].append({
+                "name": job_name,
+                "ids_label": job_ids_label,
+                "stage_name": stage_name,
+                "openings": opening_count,
+            })
         else:
-            bucket = "Early"
-            stage_name = "No active candidates"
-
-        # Count headcount from actual openings if available, else number_of_openings
-        opening_count = len([o for o in ([] if not opening_label else opening_label.split(" & "))]) if opening_label else job.get("number_of_openings", 1)
-        total_headcount += opening_count
-
-        buckets[bucket].append({
-            "name": job_name,
-            "ids_label": job_ids_label,
-            "stage_name": stage_name,
-            "openings": opening_count,
-        })
+            buckets["Early"].append({
+                "name": job_name,
+                "ids_label": job_ids_label,
+                "stage_name": "No active candidates",
+                "openings": opening_count,
+            })
 
     # Offers accepted this week
-    recent_offers = get_recent_offers(token, days=7)
+    recent_offers = get_recent_offers(token, days=8)
     offer_acceptances = []
     for offer in recent_offers:
         candidate = offer.get("candidate", {})
@@ -281,11 +354,28 @@ def build_report():
                 ).strftime("%-m/%-d")
             except Exception:
                 pass
+        last_name = candidate.get("last_name", "")
         offer_acceptances.append({
-            "name": f"{first} {last_initial}",
+            "name": f"{first} {last_name}".strip(),
             "role": job_name,
             "job_id": job_id_str,
             "start_date": start_date,
+        })
+
+    # Active offers out
+    active_offer_list = get_active_offers(token)
+    offers_out = []
+    for o in active_offer_list:
+        candidate = o.get("candidate", {})
+        first = candidate.get("first_name", "")
+        last = candidate.get("last_name", "")
+        full_name = f"{first} {last}".strip()
+        job_name = o.get("job", {}).get("name", "Unknown Role")
+        job_id_label = job_id_map.get(str(o.get("job", {}).get("id", ""))) or f"#{o.get('job', {}).get('id', '')}"
+        offers_out.append({
+            "name": full_name,
+            "role": job_name,
+            "job_id": job_id_label,
         })
 
     # New roles posted this week
@@ -303,6 +393,7 @@ def build_report():
         "total_headcount": total_headcount,
         "buckets": buckets,
         "offer_acceptances": offer_acceptances,
+        "offers_out": offers_out,
         "new_roles": new_roles,
         "generated_at": datetime.datetime.now().strftime("%B %d, %Y"),
     }
@@ -333,6 +424,7 @@ def build_html(data):
     total_headcount = data["total_headcount"]
     buckets         = data["buckets"]
     offers          = data["offer_acceptances"]
+    offers_out      = data.get("offers_out", [])
     new_roles       = data["new_roles"]
     generated_at    = data["generated_at"]
 
@@ -411,6 +503,26 @@ def build_html(data):
             f"</td></tr>"
         )
 
+    # Offers out
+    offers_out_html = ""
+    if offers_out:
+        out_items = ""
+        for o in offers_out:
+            out_items += (
+                f"<div style='background:#F0F4FF;border:0.5px solid #378ADD;border-radius:6px;"
+                f"padding:8px 12px;margin-bottom:6px;'>"
+                f"<div style='font-size:13px;font-weight:600;color:#0C447C;'>Offer out to {o['name']}"
+                f" &middot; {o['role']} <span style='font-weight:400;color:#378ADD;'>{o['job_id']}</span></div>"
+                f"</div>"
+            )
+        offers_out_html = (
+            f"<tr><td style='padding:14px 22px 6px;'>"
+            f"<div style='font-size:11px;font-weight:600;color:#378ADD;letter-spacing:0.04em;"
+            f"margin-bottom:8px;'>OFFER{'S' if len(offers_out)>1 else ''} OUT</div>"
+            f"{out_items}"
+            f"</td></tr>"
+        )
+
     # New roles
     new_roles_html = ""
     if new_roles:
@@ -451,6 +563,7 @@ def build_html(data):
     <table width="100%" cellpadding="0" cellspacing="0">
       {stages_html}
       {offers_html}
+      {offers_out_html}
       {new_roles_html}
     </table>
   </td></tr>
@@ -490,7 +603,7 @@ def create_draft(html_body):
     msg["Subject"] = subject
     msg["From"]    = SENDER_EMAIL
     msg["To"]      = "exec@code.org"
-    msg ["Cc"] = "headcount@code.org"
+    msg["Cc"]      = "headcount@code.org"
     msg.attach(MIMEText(html_body, "html"))
 
     service = get_gmail_service()
