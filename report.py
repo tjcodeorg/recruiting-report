@@ -295,6 +295,9 @@ def build_report():
         if str(job_id) in overrides:
             bucket = overrides[str(job_id)]["stage"]
             stage_name = overrides[str(job_id)].get("stage_label", "")
+            # If no stage_label set in config, derive it from actual candidate data
+            if not stage_name and apps:
+                _, stage_name = most_advanced_stage(apps)
             buckets[bucket].append({
                 "name": job_name,
                 "ids_label": job_ids_label,
@@ -382,7 +385,21 @@ def build_report():
         job_name = (offer.get("custom_fields", {}).get("job_title", {}) or {}).get("value", "")
         if not job_name:
             job_name = next((j["name"] for j in jobs if j["id"] == job_id), "Unknown Role")
-        job_id_str = job_id_map.get(str(job_id)) or get_job_openings(job_id, token) or f"#{job_id}"
+        # Use the offer's own opening_id to find the human-readable ID via the list endpoint
+        offer_opening_id = offer.get("opening_id")
+        job_id_str = None
+        if offer_opening_id:
+            try:
+                # Filter openings list by job_id and match the system opening_id
+                all_openings = gh_get("/openings", params={"job_ids": job_id}, token=token)
+                matched = next((o for o in all_openings if o.get("id") == offer_opening_id), None)
+                if matched:
+                    readable_id = matched.get("opening_id") or matched.get("id")
+                    job_id_str = f"#{readable_id}" if readable_id else None
+            except Exception:
+                pass
+        if not job_id_str:
+            job_id_str = job_id_map.get(str(job_id)) or get_job_openings(job_id, token) or f"#{job_id}"
         start_date = offer.get("starts_on", "") or offer.get("starts_at", "")
         if start_date and "T" in start_date:
             try:
@@ -478,11 +495,7 @@ def build_html(data):
     new_roles       = data["new_roles"]
     generated_at    = data["generated_at"]
 
-    headcount_label = (
-        f"{total_roles} open role{'s' if total_roles != 1 else ''} for {total_headcount} headcount"
-        if total_headcount != total_roles
-        else f"{total_roles} open role{'s' if total_roles != 1 else ''}"
-    )
+    headcount_label = f"{total_roles} open role{'s' if total_roles != 1 else ''} for {total_headcount} headcount"
 
     def stage_row(bucket):
         c = STAGE_COLORS[bucket]
