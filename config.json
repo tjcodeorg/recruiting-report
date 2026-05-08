@@ -8,13 +8,6 @@
   ],
 
   "overrides": {
-    "4402207005": {
-      "stage": "Early",
-      "stage_label": "Agency Research"
-    },
-    "4424241005": {
-      "stage": "Late",
-      "stage_label": "Boomerang"
-    }
+    
   }
 }
