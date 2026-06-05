@@ -91,12 +91,20 @@ def get_gh_token():
     return r.json()["access_token"]
 
 def gh_get(endpoint, params=None, token=None):
-    """Make a paginated GET request to the Greenhouse Harvest v3 API."""
+    """Make a paginated GET request to the Greenhouse Harvest v3 API with rate limit retry."""
+    import time
     headers = {"Authorization": f"Bearer {token}"}
     results = []
     url = f"{GH_BASE}{endpoint}"
     while url:
-        r = requests.get(url, headers=headers, params=params)
+        for attempt in range(5):
+            r = requests.get(url, headers=headers, params=params)
+            if r.status_code == 429:
+                wait = 2 ** attempt
+                print(f"  Rate limited, retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+            break
         if not r.ok:
             print(f"  API error {r.status_code} on {r.url}")
             try:
@@ -109,14 +117,14 @@ def gh_get(endpoint, params=None, token=None):
             results.extend(data)
         else:
             return data
-        # v3 uses cursor-based pagination via Link header
         link = r.headers.get("Link", "")
         url = None
         if 'rel="next"' in link:
             for part in link.split(","):
                 if 'rel="next"' in part:
                     url = part.split(";")[0].strip().strip("<>")
-        params = None  # cursor is embedded in the next URL
+        params = None
+        time.sleep(0.3)
     return results
 
 
