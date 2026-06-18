@@ -97,11 +97,11 @@ def gh_get(endpoint, params=None, token=None):
     results = []
     url = f"{GH_BASE}{endpoint}"
     while url:
-        for attempt in range(5):
+        for attempt in range(6):
             r = requests.get(url, headers=headers, params=params)
             if r.status_code == 429:
-                wait = 2 ** attempt
-                print(f"  Rate limited, retrying in {wait}s...")
+                wait = int(r.headers.get("Retry-After", 2 ** attempt))
+                print(f"  Rate limited, waiting {wait}s...")
                 time.sleep(wait)
                 continue
             break
@@ -153,12 +153,7 @@ def get_job_openings(job_id, token):
         return None
 
 
-def get_active_applications(job_id, token):
-    """Return active (non-rejected, non-hired) applications for a job."""
-    # v3 uses plural "job_ids" as the parent resource filter, not "job_id"
-    # Status values in v3: "active", "hired", "rejected" -- filter client-side to be safe
-    apps = gh_get("/applications", params={"job_ids": job_id}, token=token)
-    return [a for a in apps if a.get("status") not in ("rejected", "hired")]
+
 
 
 
@@ -274,8 +269,35 @@ def build_report():
     jobs = get_open_jobs(token)
 
     total_roles = len(jobs)
-    # Headcount will be counted from actual open openings per job below
     total_headcount = 0
+
+    # Fetch applications for all open jobs in one batch, filtered to recently active only.
+    # "last_activity_at >= 30 days ago" skips stale Application Review candidates
+    # while still catching anyone who moved stages recently.
+    import time as _time
+    thirty_days_ago = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+                       - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    open_job_ids = ",".join(str(j["id"]) for j in jobs)
+    print("  Fetching active applications...")
+    raw_apps = gh_get(
+        "/applications",
+        params={
+            "job_ids": open_job_ids,
+            "last_activity_at": f"gte|{thirty_days_ago}",
+            "per_page": 100,
+        },
+        token=token,
+    )
+    # Group by job_id and filter out rejected/hired
+    all_applications_by_job = {}
+    for app in raw_apps:
+        if app.get("status") in ("rejected", "hired"):
+            continue
+        jid = app.get("job_id")
+        if jid not in all_applications_by_job:
+            all_applications_by_job[jid] = []
+        all_applications_by_job[jid].append(app)
+    print(f"  Got {len(raw_apps)} recent applications across {len(all_applications_by_job)} jobs.")
 
     buckets = {"Early": [], "Mid": [], "Late": []}
 
@@ -288,8 +310,8 @@ def build_report():
         opening_label = get_job_openings(job_id, token)
         job_ids_label = job_id_map.get(str(job_id)) or opening_label or f"#{job_id}"
 
-        # Get applications and classify
-        apps = get_active_applications(job_id, token)
+        # Get applications and classify (pre-fetched batch, filtered by job_id)
+        apps = all_applications_by_job.get(job_id, [])
 
 
 
