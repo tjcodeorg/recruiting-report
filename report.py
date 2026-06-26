@@ -97,6 +97,7 @@ def gh_get(endpoint, params=None, token=None):
     results = []
     url = f"{GH_BASE}{endpoint}"
     while url:
+        r = None
         for attempt in range(6):
             r = requests.get(url, headers=headers, params=params)
             if r.status_code == 429:
@@ -105,6 +106,11 @@ def gh_get(endpoint, params=None, token=None):
                 time.sleep(wait)
                 continue
             break
+        if r is not None and r.status_code == 429:
+            raise RuntimeError(
+                "Greenhouse rate limit exceeded after retries. "
+                "The API quota is exhausted — wait ~15 minutes and try again."
+            )
         if not r.ok:
             print(f"  API error {r.status_code} on {r.url}")
             try:
@@ -266,7 +272,14 @@ def most_advanced_stage(applications):
 def build_report():
     overrides, job_id_map = load_config()
     token = get_gh_token()
+
     jobs = get_open_jobs(token)
+
+    if not jobs:
+        raise RuntimeError(
+            "No open jobs returned from Greenhouse. This usually means the API was "
+            "rate limited or the request failed. Aborting so we don't send an empty report."
+        )
 
     total_roles = len(jobs)
     total_headcount = 0
@@ -297,7 +310,7 @@ def build_report():
         if jid not in all_applications_by_job:
             all_applications_by_job[jid] = []
         all_applications_by_job[jid].append(app)
-    print(f"  Got {len(raw_apps)} recent applications across {len(all_applications_by_job)} jobs.")
+    print(f"  Got {len(raw_apps)} applications across {len(all_applications_by_job)} jobs.")
 
     buckets = {"Early": [], "Mid": [], "Late": []}
 
