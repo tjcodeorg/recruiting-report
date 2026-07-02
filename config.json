@@ -8,6 +8,9 @@
   ],
 
   "overrides": {
-    
+    "4431553005": {
+      "stage": "Late",
+      "stage_label": "Offer"
+    }
   }
 }
